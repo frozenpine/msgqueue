@@ -153,19 +153,21 @@ func (ch *MemoChannel[T]) disconnectUpstream() {
 
 func (ch *MemoChannel[T]) closeSubs() {
 	ch.subscriberCache.Range(func(subscriber, subData any) bool {
-		defer func() {
-			ch.subscriberCache.Delete(subscriber)
-			ch.subscriberWg.Done()
-		}()
+		// defer func() {
+		// 	ch.subscriberCache.Delete(subscriber)
+		// 	ch.subscriberWg.Done()
+		// }()
 
-		if pubCh, ok := subData.(*sub[T]); ok {
-			slog.Info(
-				"closing pub channel for subscriber",
-				slog.Any("sub", subscriber),
-			)
+		// if pubCh, ok := subData.(*sub[T]); ok {
+		// 	slog.Info(
+		// 		"closing pub channel for subscriber",
+		// 		slog.Any("sub", subscriber),
+		// 	)
 
-			pubCh.close()
-		}
+		// 	pubCh.close()
+		// }
+		subID, _ := subscriber.(uuid.UUID)
+		ch.UnSubscribe(subID)
 
 		return true
 	})
@@ -244,8 +246,15 @@ func (ch *MemoChannel[T]) UnSubscribe(subID uuid.UUID) error {
 		return core.ErrNoSubcriber
 	}
 
-	subData.(*sub[T]).close()
-	ch.subscriberWg.Done()
+	if pubCh, ok := subData.(*sub[T]); ok {
+		slog.Info(
+			"closing pub channel for subscriber",
+			slog.Any("sub", subID),
+		)
+
+		pubCh.close()
+		ch.subscriberWg.Done()
+	}
 
 	return nil
 }
