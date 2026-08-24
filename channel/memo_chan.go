@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -12,8 +13,9 @@ import (
 )
 
 type sub[T any] struct {
-	once sync.Once
-	data chan T
+	subID uuid.UUID
+	once  sync.Once
+	data  chan T
 }
 
 func (sub *sub[T]) close() {
@@ -199,7 +201,19 @@ func (ch *MemoChannel[T]) inputDispatcher() {
 			}
 
 			ch.subscriberCache.Range(func(subcriber, subData any) bool {
-				sub := subData.(*sub[T]).data
+				sub := subData.(*sub[T])
+
+				defer func() {
+					if err := recover(); err != nil {
+						ch.subscriberCache.Delete(subcriber)
+						slog.Error(
+							"publish data to subscriber failed",
+							slog.Any("error", err),
+							slog.String("sub_id", sub.subID.String()),
+							slog.String("stack", string(debug.Stack())),
+						)
+					}
+				}()
 
 				select {
 				case <-ch.timeout(500 * time.Millisecond):
@@ -207,7 +221,7 @@ func (ch *MemoChannel[T]) inputDispatcher() {
 						"publish timeout to subscriber",
 						slog.Any("subscriber", subcriber),
 					)
-				case sub <- v:
+				case sub.data <- v:
 				}
 
 				return true
@@ -219,7 +233,9 @@ func (ch *MemoChannel[T]) inputDispatcher() {
 func (ch *MemoChannel[T]) Subscribe(name string, resumeType core.ResumeType) (uuid.UUID, <-chan T) {
 	subID := core.GenID(name)
 
-	subData, subExist := ch.subscriberCache.LoadOrStore(subID, &sub[T]{data: ch.makeChan()})
+	subData, subExist := ch.subscriberCache.LoadOrStore(
+		subID, &sub[T]{subID: subID, data: ch.makeChan()},
+	)
 
 	if subExist {
 		slog.Warn(
