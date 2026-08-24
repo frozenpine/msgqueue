@@ -220,12 +220,17 @@ func (ch *MemoChannel[T]) inputDispatcher() {
 
 				select {
 				case <-sub.ctx.Done():
+					ch.subscriberCache.Delete(subcriber)
+					slog.Warn(
+						"subscriber chan already closed",
+						slog.String("sub_id", sub.subID.String()),
+					)
 				default:
 					select {
 					case <-ch.timeout(500 * time.Millisecond):
 						slog.Warn(
 							"publish timeout to subscriber",
-							slog.Any("subscriber", subcriber),
+							slog.String("sub_id", sub.subID.String()),
 						)
 					case sub.data <- v:
 					}
