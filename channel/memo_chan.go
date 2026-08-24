@@ -13,12 +13,15 @@ import (
 )
 
 type sub[T any] struct {
-	subID uuid.UUID
-	once  sync.Once
-	data  chan T
+	subID  uuid.UUID
+	once   sync.Once
+	ctx    context.Context
+	cancel context.CancelFunc
+	data   chan T
 }
 
 func (sub *sub[T]) close() {
+	sub.cancel()
 	sub.once.Do(func() { close(sub.data) })
 }
 
@@ -216,12 +219,16 @@ func (ch *MemoChannel[T]) inputDispatcher() {
 				}()
 
 				select {
-				case <-ch.timeout(500 * time.Millisecond):
-					slog.Warn(
-						"publish timeout to subscriber",
-						slog.Any("subscriber", subcriber),
-					)
-				case sub.data <- v:
+				case <-sub.ctx.Done():
+				default:
+					select {
+					case <-ch.timeout(500 * time.Millisecond):
+						slog.Warn(
+							"publish timeout to subscriber",
+							slog.Any("subscriber", subcriber),
+						)
+					case sub.data <- v:
+					}
 				}
 
 				return true
@@ -231,28 +238,26 @@ func (ch *MemoChannel[T]) inputDispatcher() {
 }
 
 func (ch *MemoChannel[T]) Subscribe(name string, resumeType core.ResumeType) (uuid.UUID, <-chan T) {
-	subID := core.GenID(name)
-
-	subData, subExist := ch.subscriberCache.LoadOrStore(
-		subID, &sub[T]{subID: subID, data: ch.makeChan()},
-	)
+	s := &sub[T]{subID: core.GenID(name), data: ch.makeChan()}
+	s.ctx, s.cancel = context.WithCancel(ch.runCtx)
+	subData, subExist := ch.subscriberCache.LoadOrStore(s.subID, s)
 
 	if subExist {
 		slog.Warn(
 			"channel exist for subscriber",
 			slog.String("name", name),
-			slog.String("sub_id", subID.String()),
+			slog.String("sub_id", s.subID.String()),
 		)
 	} else {
 		ch.subscriberWg.Add(1)
 		slog.Info(
 			"new subscriber add",
 			slog.String("name", name),
-			slog.String("sub_id", subID.String()),
+			slog.String("sub_id", s.subID.String()),
 		)
 	}
 
-	return subID, subData.(*sub[T]).ch()
+	return s.subID, subData.(*sub[T]).ch()
 }
 
 func (ch *MemoChannel[T]) UnSubscribe(subID uuid.UUID) error {
