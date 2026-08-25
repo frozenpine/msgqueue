@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/frozenpine/msgqueue/core"
@@ -13,22 +14,13 @@ import (
 )
 
 type sub[T any] struct {
-	subID  uuid.UUID
-	once   sync.Once
-	ctx    context.Context
-	cancel context.CancelFunc
-
-	closeHdl func()
-	data     chan T
+	subID uuid.UUID
+	close atomic.Bool
+	data  chan T
 }
 
 func (sub *sub[T]) unsub() {
-	sub.cancel()
-	sub.close()
-}
-
-func (sub *sub[T]) close() {
-	sub.once.Do(sub.closeHdl)
+	sub.close.Store(true)
 }
 
 func (sub *sub[T]) sub() <-chan T {
@@ -214,7 +206,8 @@ func (ch *MemoChannel[T]) inputDispatcher() {
 
 				defer func() {
 					if err := recover(); err != nil {
-						sub.close()
+						ch.subscriberCache.Delete(subcriber)
+						ch.subscriberWg.Done()
 						slog.Error(
 							"publish data to subscriber failed",
 							slog.Any("error", err),
@@ -224,14 +217,7 @@ func (ch *MemoChannel[T]) inputDispatcher() {
 					}
 				}()
 
-				select {
-				case <-sub.ctx.Done():
-					sub.close()
-					slog.Warn(
-						"subscriber chan already closed",
-						slog.String("sub_id", sub.subID.String()),
-					)
-				default:
+				if !sub.close.Load() {
 					select {
 					case <-ch.timeout(500 * time.Millisecond):
 						slog.Warn(
@@ -240,6 +226,10 @@ func (ch *MemoChannel[T]) inputDispatcher() {
 						)
 					case sub.data <- v:
 					}
+				} else {
+					close(sub.data)
+					ch.subscriberCache.Delete(subcriber)
+					ch.subscriberWg.Done()
 				}
 
 				return true
@@ -252,12 +242,6 @@ func (ch *MemoChannel[T]) Subscribe(name string, resumeType core.ResumeType) (uu
 	s := &sub[T]{
 		subID: core.GenID(name),
 		data:  ch.makeChan(),
-	}
-	s.ctx, s.cancel = context.WithCancel(ch.runCtx)
-	s.closeHdl = func() {
-		close(s.data)
-		ch.subscriberCache.Delete(s.subID)
-		ch.subscriberWg.Done()
 	}
 	subData, subExist := ch.subscriberCache.LoadOrStore(s.subID, s)
 
