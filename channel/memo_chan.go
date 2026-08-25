@@ -17,15 +17,21 @@ type sub[T any] struct {
 	once   sync.Once
 	ctx    context.Context
 	cancel context.CancelFunc
-	data   chan T
+
+	closeHdl func()
+	data     chan T
+}
+
+func (sub *sub[T]) unsub() {
+	sub.cancel()
+	sub.close()
 }
 
 func (sub *sub[T]) close() {
-	sub.cancel()
-	sub.once.Do(func() { close(sub.data) })
+	sub.once.Do(sub.closeHdl)
 }
 
-func (sub *sub[T]) ch() <-chan T {
+func (sub *sub[T]) sub() <-chan T {
 	return sub.data
 }
 
@@ -208,7 +214,7 @@ func (ch *MemoChannel[T]) inputDispatcher() {
 
 				defer func() {
 					if err := recover(); err != nil {
-						ch.subscriberCache.Delete(subcriber)
+						sub.close()
 						slog.Error(
 							"publish data to subscriber failed",
 							slog.Any("error", err),
@@ -220,7 +226,7 @@ func (ch *MemoChannel[T]) inputDispatcher() {
 
 				select {
 				case <-sub.ctx.Done():
-					ch.subscriberCache.Delete(subcriber)
+					sub.close()
 					slog.Warn(
 						"subscriber chan already closed",
 						slog.String("sub_id", sub.subID.String()),
@@ -243,8 +249,16 @@ func (ch *MemoChannel[T]) inputDispatcher() {
 }
 
 func (ch *MemoChannel[T]) Subscribe(name string, resumeType core.ResumeType) (uuid.UUID, <-chan T) {
-	s := &sub[T]{subID: core.GenID(name), data: ch.makeChan()}
+	s := &sub[T]{
+		subID: core.GenID(name),
+		data:  ch.makeChan(),
+	}
 	s.ctx, s.cancel = context.WithCancel(ch.runCtx)
+	s.closeHdl = func() {
+		close(s.data)
+		ch.subscriberCache.Delete(s.subID)
+		ch.subscriberWg.Done()
+	}
 	subData, subExist := ch.subscriberCache.LoadOrStore(s.subID, s)
 
 	if subExist {
@@ -262,7 +276,7 @@ func (ch *MemoChannel[T]) Subscribe(name string, resumeType core.ResumeType) (uu
 		)
 	}
 
-	return s.subID, subData.(*sub[T]).ch()
+	return s.subID, subData.(*sub[T]).sub()
 }
 
 func (ch *MemoChannel[T]) UnSubscribe(subID uuid.UUID) error {
@@ -278,8 +292,7 @@ func (ch *MemoChannel[T]) UnSubscribe(subID uuid.UUID) error {
 			slog.Any("sub", subID),
 		)
 
-		pubCh.close()
-		ch.subscriberWg.Done()
+		pubCh.unsub()
 	}
 
 	return nil
